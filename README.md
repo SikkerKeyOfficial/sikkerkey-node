@@ -1,6 +1,11 @@
 # SikkerKey Node.js SDK
 
-The official Node.js SDK for [SikkerKey](https://sikkerkey.com). Read-only access to secrets using Ed25519 machine authentication. Zero external dependencies — Node.js built-in `crypto`, `fs`, `http`, `https` only.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@sikkerkey/sdk)](https://www.npmjs.com/package/@sikkerkey/sdk)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+
+The official Node.js SDK for [SikkerKey](https://sikkerkey.com). Read-only access to secrets using Ed25519 machine authentication. Zero external dependencies - Node.js built-in `crypto`, `fs`, `http`, `https` only.
 
 ## Installation
 
@@ -213,4 +218,4 @@ None. Uses Node.js built-ins only: `crypto`, `fs`, `path`, `http`, `https`.
 
 ## License
 
-Proprietary. See [sikkerkey.com/terms](https://sikkerkey.com/terms) for details.
+MIT - see [LICENSE](LICENSE) for details.
