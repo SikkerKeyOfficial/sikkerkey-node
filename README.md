@@ -96,6 +96,63 @@ const env = await sk.export('proj_production')
 
 Secret names are converted to uppercase env format. Structured secrets are flattened: `SECRET_NAME_FIELD_NAME`.
 
+## Watching for Changes
+
+Watch secrets for real-time updates. When a secret is rotated, updated, or deleted, the callback fires with the new value. Polling uses `setInterval` on Node's event loop - your application is never blocked.
+
+```typescript
+sk.watch('sk_db_password', (event) => {
+  switch (event.status) {
+    case 'changed':
+      console.log(`New value: ${event.value}`)
+      // Structured secrets include parsed fields
+      console.log(`Fields:`, event.fields)
+      break
+    case 'deleted':
+      console.log('Secret was deleted')
+      break
+    case 'access_denied':
+      console.log('Access revoked')
+      break
+    case 'error':
+      console.log(`Error: ${event.error}`)
+      break
+  }
+})
+```
+
+### Practical Example
+
+```typescript
+// Auto-rotate database credentials
+sk.watch('sk_db_credentials', (event) => {
+  if (event.status === 'changed') {
+    db.reconfigure({
+      username: event.fields!.username,
+      password: event.fields!.password,
+    })
+  }
+})
+```
+
+### Poll Interval
+
+The default poll interval is 15 seconds. The server enforces a minimum of 10 seconds.
+
+```typescript
+sk.setPollInterval(30) // seconds
+```
+
+### Stop Watching
+
+```typescript
+// Stop watching a specific secret
+sk.unwatch('sk_db_password')
+
+// Stop all watches and shut down polling
+sk.close()
+```
+
 ## Multi-Vault
 
 ```typescript
@@ -205,6 +262,10 @@ HTTPS is enforced for all non-localhost connections. 15-second request timeout.
 | `listSecrets()` | `Promise<SecretListItem[]>` | List all accessible secrets |
 | `listSecretsByProject(projectId)` | `Promise<SecretListItem[]>` | List secrets in a project |
 | `export(projectId?)` | `Promise<Record<string, string>>` | Export as env map |
+| `watch(secretId, callback)` | `void` | Watch a secret for changes |
+| `unwatch(secretId)` | `void` | Stop watching a secret |
+| `setPollInterval(seconds)` | `void` | Set poll interval (min 10s) |
+| `close()` | `void` | Stop all watches, shut down polling |
 
 ## Dependencies
 

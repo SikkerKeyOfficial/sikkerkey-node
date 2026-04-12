@@ -1,7 +1,7 @@
 {
-  "name": "sikkerkey",
-  "version": "0.1.0",
-  "description": "SikkerKey Node.js SDK — manage secrets with machine authentication",
+  "name": "@sikkerkey/sdk",
+  "version": "1.1.0",
+  "description": "SikkerKey Node.js SDK — read secrets with machine authentication",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

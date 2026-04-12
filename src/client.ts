@@ -26,6 +26,16 @@ export interface SecretListItem {
   projectId: string | null
 }
 
+export type WatchStatus = 'changed' | 'deleted' | 'access_denied' | 'error'
+
+export interface WatchEvent {
+  secretId: string
+  status: WatchStatus
+  value: string | null
+  fields: Record<string, string> | null
+  error: string | null
+}
+
 interface Identity {
   machineId: string
   machineName: string
@@ -45,6 +55,9 @@ const BACKOFF_MS = [1000, 2000, 4000]
 export class SikkerKey {
   private identity: Identity
   private privateKey: crypto.KeyObject
+  private watchers: Map<string, (event: WatchEvent) => void> = new Map()
+  private pollIntervalMs: number = 15_000
+  private pollTimer: ReturnType<typeof setInterval> | null = null
 
   private constructor(identity: Identity, privateKey: crypto.KeyObject) {
     this.identity = identity
@@ -148,6 +161,96 @@ export class SikkerKey {
         return fs.statSync(dir).isDirectory() && fs.existsSync(path.join(dir, 'identity.json'))
       })
       .sort()
+  }
+
+  // ── Watch ──
+
+  /** Register a callback that fires when the given secret changes, is deleted, or becomes inaccessible. */
+  watch(secretId: string, callback: (event: WatchEvent) => void): void {
+    this.watchers.set(secretId, callback)
+    if (this.pollTimer === null) {
+      this.pollTimer = setInterval(() => { this.pollWatchers() }, this.pollIntervalMs)
+      this.pollTimer.unref()
+    }
+  }
+
+  /** Stop watching a secret. If no watches remain, polling stops automatically. */
+  unwatch(secretId: string): void {
+    this.watchers.delete(secretId)
+    if (this.watchers.size === 0 && this.pollTimer !== null) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+  }
+
+  /** Set the polling interval in seconds (minimum 10). Default is 15. */
+  setPollInterval(seconds: number): void {
+    const clamped = Math.max(10, seconds)
+    this.pollIntervalMs = clamped * 1000
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = setInterval(() => { this.pollWatchers() }, this.pollIntervalMs)
+      this.pollTimer.unref()
+    }
+  }
+
+  /** Stop all watching and clear all registered callbacks. */
+  close(): void {
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+    this.watchers.clear()
+  }
+
+  private async pollWatchers(): Promise<void> {
+    const ids = Array.from(this.watchers.keys())
+    if (ids.length === 0) return
+
+    let changes: Record<string, { status: string }>
+    try {
+      const body = await this.request('POST', '/v1/secrets/poll', JSON.stringify({ watch: ids }))
+      changes = JSON.parse(body).changes
+    } catch {
+      return
+    }
+
+    for (const [secretId, info] of Object.entries(changes)) {
+      const callback = this.watchers.get(secretId)
+      if (!callback) continue
+
+      const status = info.status as WatchStatus
+
+      if (status === 'changed') {
+        try {
+          const value = await this.getSecret(secretId)
+          let fields: Record<string, string> | null = null
+          try {
+            const parsed = JSON.parse(value)
+            if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+              fields = {}
+              for (const [k, v] of Object.entries(parsed)) fields[k] = String(v)
+            }
+          } catch { /* not structured */ }
+          callback({ secretId, status: 'changed', value, fields, error: null })
+        } catch (e) {
+          callback({ secretId, status: 'error', value: null, fields: null, error: (e as Error).message })
+        }
+        continue
+      }
+
+      if (status === 'deleted' || status === 'access_denied') {
+        callback({ secretId, status, value: null, fields: null, error: null })
+        this.watchers.delete(secretId)
+        if (this.watchers.size === 0 && this.pollTimer !== null) {
+          clearInterval(this.pollTimer)
+          this.pollTimer = null
+        }
+        continue
+      }
+
+      callback({ secretId, status: 'error', value: null, fields: null, error: `Unknown status: ${status}` })
+    }
   }
 
   // ── Internal ──
