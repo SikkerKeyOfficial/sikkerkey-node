@@ -13,3 +13,5 @@ export {
   SecretStructureError,
   FieldNotFoundError,
 } from './exceptions'
+export { SikkerKeyBootstrap, BootstrappedClient } from './bootstrap'
+export type { BootstrapOptions } from './bootstrap'

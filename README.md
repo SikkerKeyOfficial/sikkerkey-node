@@ -5,7 +5,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 
-The official Node.js SDK for [SikkerKey](https://sikkerkey.com). Read-only access to secrets using Ed25519 machine authentication. Zero external dependencies - Node.js built-in `crypto`, `fs`, `http`, `https` only.
+The official Node.js SDK for [SikkerKey](https://sikkerkey.com). Read-only access to secrets using Ed25519 machine authentication. Zero external dependencies - Node.js built-in `crypto`, `fs`, `http`, `https` only. Runs on persistent hosts (identity on disk) and on serverless or ephemeral environments (memory-only bootstrap).
 
 ## Installation
 
@@ -40,6 +40,56 @@ const sk = SikkerKey.create()
 ```
 
 Auto-detection throws `ConfigurationError` if multiple vaults are registered and no vault is specified.
+
+## Serverless (Memory-Only Bootstrap)
+
+On a long-lived host the SDK loads a persistent identity from disk. Serverless and other ephemeral or read-only-filesystem environments (Vercel, Netlify, AWS Lambda, Google Cloud Run, Fly.io, and similar) have no identity to persist. `SikkerKey.bootstrap()` handles that case: it generates an Ed25519 keypair in memory, enrolls a short-lived ephemeral machine with an enrollment token, and reads secrets, all without writing anything to disk.
+
+```typescript
+import { SikkerKey } from '@sikkerkey/sdk'
+
+const sk = SikkerKey.bootstrap(
+  process.env.SIKKERKEY_VAULT_ID,
+  process.env.SIKKERKEY_ENROLLMENT_TOKEN,
+).inMemory()
+
+const dbUrl = await sk.getSecret('sk_db_prod')
+```
+
+Create an enrollment token in the dashboard and supply its plaintext plus your vault ID. The token only registers an ephemeral machine scoped to the policy you set (projects, secrets, lifetime); it cannot read secrets on its own.
+
+### How It Works
+
+- `bootstrap(vaultId, token, options?).inMemory()` returns immediately and does no network work.
+- The first read enrolls lazily: it generates a keypair in memory, registers an ephemeral machine, and signs every request with the in-memory private key. Concurrent first reads share a single enrollment.
+- The identity is reused while the instance stays warm, and re-enrolled automatically shortly before the machine's lifetime expires.
+- Nothing is written to disk. The private key lives only in process memory and is gone when the instance is recycled.
+
+Enrollment errors (bad token, sealed vault, IP not allowed) surface on the first read. Call `await sk.ready()` to enroll eagerly at startup instead.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `hostname` | `$HOSTNAME`, then `serverless` | Label recorded on the machine. Must match the token's hostname pattern if one is set |
+| `name` | none | Optional machine name to request. Overridden when the enrollment token defines a name pattern (the server generates the name from it) |
+| `renewSkewMs` | `60000` | Re-enroll this many milliseconds before the machine lifetime expires |
+
+The returned client exposes the same read methods as a disk-based client (`getSecret`, `getFields`, `getField`, `listSecrets`, `listSecretsByProject`, `export`), plus `ready()` (force enrollment and return the underlying client) and `close()`.
+
+### Provisioning the Token for Serverless
+
+When you create the enrollment token for a serverless deployment:
+
+- Set a short machine lifetime (minutes). Each cold start mints a fresh ephemeral machine, and short-lived ones free their slot quickly as they expire.
+- Set max-uses high enough for your cold-start and concurrency volume.
+- Leave the source-CIDR restriction unset, since serverless egress IPs are dynamic.
+- If the vault has an IP allowlist, make sure it permits the platform's egress or leave it off. Enrollment enforces the allowlist.
+- Set a name pattern on the token (for example `vercel-{uuid8}`) so each cold-start machine gets a clean, unique name in the dashboard instead of all sharing one hostname. A name pattern takes precedence over any `name` the SDK sends. `{uuidN}` inserts N random characters (4 to 32, default 8); `{uuid}` inserts 8.
+
+Each live ephemeral machine counts against your plan's machine limit until it expires and is cleaned up, so size your plan for your expected concurrency.
+
+Requires a Node.js runtime with outbound HTTPS. Edge runtimes, which lack Node's `crypto` and `fs`, are not supported yet.
 
 ## Reading Secrets
 
@@ -234,6 +284,7 @@ The `vault_` prefix is added automatically if not present.
 |----------|-------------|
 | `SIKKERKEY_IDENTITY` | Path to `identity.json` — overrides vault lookup |
 | `SIKKERKEY_HOME` | Base config directory (default: `~/.sikkerkey`) |
+| `SIKKERKEY_API_URL` | Override the API base URL. Local development only (default: `https://api.sikkerkey.com`) |
 
 ## Retry Behavior
 
@@ -254,7 +305,8 @@ HTTPS is enforced for all non-localhost connections. 15-second request timeout.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `SikkerKey.create(vaultOrPath?)` | `SikkerKey` | Create client (sync) |
+| `SikkerKey.create(vaultOrPath?)` | `SikkerKey` | Create client from disk identity (sync) |
+| `SikkerKey.bootstrap(vaultId, token, options?)` | `SikkerKeyBootstrap` | Memory-only serverless bootstrap (static); call `.inMemory()` |
 | `SikkerKey.listVaults()` | `string[]` | List registered vault IDs (static) |
 | `getSecret(secretId)` | `Promise<string>` | Read a secret value |
 | `getFields(secretId)` | `Promise<Record<string, string>>` | Read structured secret |

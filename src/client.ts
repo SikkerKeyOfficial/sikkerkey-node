@@ -16,6 +16,7 @@ import {
   ServerSealedError,
   SikkerKeyError,
 } from './exceptions'
+import { SikkerKeyBootstrap, type BootstrapOptions } from './bootstrap'
 
 // ── Types ──
 
@@ -69,6 +70,24 @@ export class SikkerKey {
     const identityFile = resolveIdentity(vaultOrPath)
     const { identity, privateKey } = loadIdentity(identityFile)
     return new SikkerKey(identity, privateKey)
+  }
+
+  /**
+   * Bootstrap a memory-only ephemeral identity for serverless / read-only
+   * filesystem environments. Generates an Ed25519 keypair in memory and
+   * lazily enrolls an ephemeral machine using an enrollment token; nothing is
+   * written to disk. Reused while warm, re-enrolled near TTL expiry.
+   *
+   *   const sk = SikkerKey.bootstrap(vaultId, token).inMemory()
+   *   const value = await sk.getSecret('secret-id')
+   */
+  static bootstrap(vaultId: string, token: string, options: BootstrapOptions = {}): SikkerKeyBootstrap {
+    return new SikkerKeyBootstrap(
+      vaultId,
+      token,
+      options,
+      (identity, privateKey) => new SikkerKey(identity, privateKey),
+    )
   }
 
   get machineId(): string { return this.identity.machineId }
