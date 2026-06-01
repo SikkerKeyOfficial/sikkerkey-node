@@ -48,7 +48,7 @@ On a long-lived host the SDK loads a persistent identity from disk. Serverless a
 ```typescript
 import { SikkerKey } from '@sikkerkey/sdk'
 
-const sk = SikkerKey.bootstrap(
+const sk = await SikkerKey.bootstrap(
   process.env.SIKKERKEY_VAULT_ID,
   process.env.SIKKERKEY_ENROLLMENT_TOKEN,
 ).inMemory()
@@ -60,12 +60,12 @@ Create an enrollment token in the dashboard and supply its plaintext plus your v
 
 ### How It Works
 
-- `bootstrap(vaultId, token, options?).inMemory()` returns immediately and does no network work.
-- The first read enrolls lazily: it generates a keypair in memory, registers an ephemeral machine, and signs every request with the in-memory private key. Concurrent first reads share a single enrollment.
-- The identity is reused while the instance stays warm, and re-enrolled automatically shortly before the machine's lifetime expires.
+- `await bootstrap(vaultId, token, options?).inMemory()` enrolls once: it generates a keypair in memory, registers an ephemeral machine, and returns a ready client.
+- The returned client signs every read with the in-memory private key, exactly like a disk-based client.
 - Nothing is written to disk. The private key lives only in process memory and is gone when the instance is recycled.
+- The ephemeral machine lives for the lifetime set on the enrollment token. Reading after it expires fails like any expired machine, so set the token's machine lifetime to suit your workload. The common path is to read at startup and hold the values.
 
-Enrollment errors (bad token, sealed vault, IP not allowed) surface on the first read. Call `await sk.ready()` to enroll eagerly at startup instead.
+Enrollment errors (bad token, sealed vault, IP not allowed) surface from the `inMemory()` call, so a misconfigured deployment fails at startup rather than on a later request.
 
 ### Options
 
@@ -73,9 +73,8 @@ Enrollment errors (bad token, sealed vault, IP not allowed) surface on the first
 |--------|---------|-------------|
 | `hostname` | `$HOSTNAME`, then `serverless` | Label recorded on the machine. Must match the token's hostname pattern if one is set |
 | `name` | none | Optional machine name to request. Overridden when the enrollment token defines a name pattern (the server generates the name from it) |
-| `renewSkewMs` | `60000` | Re-enroll this many milliseconds before the machine lifetime expires |
 
-The returned client exposes the same read methods as a disk-based client (`getSecret`, `getFields`, `getField`, `listSecrets`, `listSecretsByProject`, `export`), plus `ready()` (force enrollment and return the underlying client) and `close()`.
+The resolved value is an ordinary `SikkerKey` client with the same methods as a disk-based one (`getSecret`, `getFields`, `getField`, `listSecrets`, `listSecretsByProject`, `export`, `watch`, `close`).
 
 ### Provisioning the Token for Serverless
 
@@ -306,7 +305,7 @@ HTTPS is enforced for all non-localhost connections. 15-second request timeout.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `SikkerKey.create(vaultOrPath?)` | `SikkerKey` | Create client from disk identity (sync) |
-| `SikkerKey.bootstrap(vaultId, token, options?)` | `SikkerKeyBootstrap` | Memory-only serverless bootstrap (static); call `.inMemory()` |
+| `SikkerKey.bootstrap(vaultId, token, options?)` | `SikkerKeyBootstrap` | Memory-only serverless bootstrap (static); `await .inMemory()` returns a ready client |
 | `SikkerKey.listVaults()` | `string[]` | List registered vault IDs (static) |
 | `getSecret(secretId)` | `Promise<string>` | Read a secret value |
 | `getFields(secretId)` | `Promise<Record<string, string>>` | Read structured secret |

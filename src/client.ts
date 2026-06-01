@@ -74,11 +74,12 @@ export class SikkerKey {
 
   /**
    * Bootstrap a memory-only ephemeral identity for serverless / read-only
-   * filesystem environments. Generates an Ed25519 keypair in memory and
-   * lazily enrolls an ephemeral machine using an enrollment token; nothing is
-   * written to disk. Reused while warm, re-enrolled near TTL expiry.
+   * filesystem environments. Call `.inMemory()` to enroll: it generates an
+   * Ed25519 keypair in memory and registers an ephemeral machine with the
+   * enrollment token; nothing is written to disk. Enrollment happens once, and
+   * the returned client behaves exactly like a disk-based client thereafter.
    *
-   *   const sk = SikkerKey.bootstrap(vaultId, token).inMemory()
+   *   const sk = await SikkerKey.bootstrap(vaultId, token).inMemory()
    *   const value = await sk.getSecret('secret-id')
    */
   static bootstrap(vaultId: string, token: string, options: BootstrapOptions = {}): SikkerKeyBootstrap {

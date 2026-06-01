@@ -2,6 +2,7 @@ import * as crypto from 'crypto'
 import * as http from 'http'
 import * as https from 'https'
 import {
+  SikkerKeyError,
   ApiError,
   AuthenticationError,
   AccessDeniedError,
@@ -11,12 +12,11 @@ import {
   RateLimitedError,
   ServerSealedError,
 } from './exceptions'
-import type { SikkerKey, SecretListItem } from './client'
+import type { SikkerKey } from './client'
 
 // ── Constants ──
 
 const DEFAULT_API_URL = 'https://api.sikkerkey.com'
-const DEFAULT_RENEW_SKEW_MS = 60_000
 const ENROLL_TIMEOUT_MS = 15_000
 
 // ── Types ──
@@ -24,10 +24,8 @@ const ENROLL_TIMEOUT_MS = 15_000
 export interface BootstrapOptions {
   /** Hostname label recorded on the enrolled machine. If the enrollment token sets a hostname pattern, this must match it. */
   hostname?: string
-  /** Optional machine name to request. */
+  /** Optional machine name to request. Overridden when the enrollment token defines a name pattern (the server generates the name from it). */
   name?: string
-  /** Re-enroll this many ms before the ephemeral machine's TTL expires. Default 60_000. */
-  renewSkewMs?: number
 }
 
 interface EnrollIdentity {
@@ -38,7 +36,7 @@ interface EnrollIdentity {
   privateKeyPath: string
 }
 
-/** Builds an in-memory SikkerKey from an enrolled identity + private key. Supplied by SikkerKey.bootstrap so the private constructor never leaks. */
+/** Builds a SikkerKey from an enrolled identity + in-memory private key. Supplied by SikkerKey.bootstrap so the private constructor never leaks. */
 export type SikkerKeyFactory = (identity: EnrollIdentity, privateKey: crypto.KeyObject) => SikkerKey
 
 interface EnrollResponse {
@@ -50,7 +48,7 @@ interface EnrollResponse {
 
 // ── Builder ──
 
-/** Returned by `SikkerKey.bootstrap()`. Call `.inMemory()` to get a client. */
+/** Returned by `SikkerKey.bootstrap()`. Call `.inMemory()` to enroll and get a ready client. */
 export class SikkerKeyBootstrap {
   constructor(
     private readonly vaultId: string,
@@ -60,114 +58,34 @@ export class SikkerKeyBootstrap {
   ) {}
 
   /**
-   * Create a memory-only client. Nothing is written to disk: an Ed25519
-   * keypair is generated in memory and an ephemeral machine is enrolled
-   * lazily on first use, reused while the instance stays warm, and
-   * re-enrolled when its TTL nears expiry. Built for serverless and
+   * Enroll an ephemeral machine in memory and return a ready client.
+   *
+   * Generates an Ed25519 keypair in memory, registers an ephemeral machine
+   * with the enrollment token, and returns a client whose identity lives only
+   * in process memory. Nothing is written to disk. Built for serverless and
    * read-only-filesystem environments.
+   *
+   * Enrollment happens once, here. After it resolves, the returned client is an
+   * ordinary {@link SikkerKey}: it signs each read with the in-memory key, no
+   * different from a disk-based client. The ephemeral machine lives for the
+   * lifetime set on the enrollment token; reading after it expires fails like
+   * any expired machine, so set the token's machine lifetime to suit the
+   * workload. The common path is to read at startup and hold the values.
    */
-  inMemory(): BootstrappedClient {
-    return new BootstrappedClient(this.vaultId, this.token, this.options, this.factory)
-  }
-}
+  async inMemory(): Promise<SikkerKey> {
+    if (!this.vaultId) throw new ConfigurationError('SikkerKey.bootstrap requires a vault ID')
+    if (!this.token) throw new ConfigurationError('SikkerKey.bootstrap requires an enrollment token')
 
-// ── Memory-only client ──
-
-/**
- * A read client backed by a lazily-enrolled, memory-only ephemeral identity.
- * Wraps (does not modify) the disk-based {@link SikkerKey}: each call resolves
- * the underlying client (enrolling on first use, re-enrolling near expiry) and
- * delegates to it.
- */
-export class BootstrappedClient {
-  private readonly apiUrl: string
-  private readonly renewSkewMs: number
-  private cached: { client: SikkerKey; expiresAt: number } | null = null
-  private pending: Promise<{ client: SikkerKey; expiresAt: number }> | null = null
-
-  constructor(
-    private readonly vaultId: string,
-    private readonly token: string,
-    private readonly options: BootstrapOptions,
-    private readonly factory: SikkerKeyFactory,
-  ) {
-    if (!vaultId) throw new ConfigurationError('SikkerKey.bootstrap requires a vault ID')
-    if (!token) throw new ConfigurationError('SikkerKey.bootstrap requires an enrollment token')
     // SikkerKey is a managed service; the API URL is fixed and never set by
     // callers. The env override exists only for local development.
-    const url = process.env.SIKKERKEY_API_URL ?? DEFAULT_API_URL
-    if (!url.startsWith('https://') && !url.startsWith('http://localhost')) {
+    const raw = process.env.SIKKERKEY_API_URL ?? DEFAULT_API_URL
+    if (!raw.startsWith('https://') && !raw.startsWith('http://localhost')) {
       throw new ConfigurationError(
-        `API URL must use HTTPS: ${url}. Use http://localhost only for local development.`
+        `API URL must use HTTPS: ${raw}. Use http://localhost only for local development.`,
       )
     }
-    this.apiUrl = url.replace(/\/+$/, '')
-    this.renewSkewMs = options.renewSkewMs ?? DEFAULT_RENEW_SKEW_MS
-  }
+    const apiUrl = raw.replace(/\/+$/, '')
 
-  /** Force enrollment now and return the underlying client (for getters, watch, etc.). */
-  async ready(): Promise<SikkerKey> {
-    return (await this.ensure()).client
-  }
-
-  /** Fetch a secret value by ID. */
-  async getSecret(secretId: string): Promise<string> {
-    return (await this.ensure()).client.getSecret(secretId)
-  }
-
-  /** Fetch a structured secret as a field map. */
-  async getFields(secretId: string): Promise<Record<string, string>> {
-    return (await this.ensure()).client.getFields(secretId)
-  }
-
-  /** Fetch a single field from a structured secret. */
-  async getField(secretId: string, field: string): Promise<string> {
-    return (await this.ensure()).client.getField(secretId, field)
-  }
-
-  /** List all secrets this machine can access. */
-  async listSecrets(): Promise<SecretListItem[]> {
-    return (await this.ensure()).client.listSecrets()
-  }
-
-  /** List secrets in a specific project. */
-  async listSecretsByProject(projectId: string): Promise<SecretListItem[]> {
-    return (await this.ensure()).client.listSecretsByProject(projectId)
-  }
-
-  /** Export all accessible secrets as a flat key-value map. */
-  async export(projectId?: string): Promise<Record<string, string>> {
-    return (await this.ensure()).client.export(projectId)
-  }
-
-  /** Stop the underlying client (clears any watch timers) and drop the cached identity. */
-  close(): void {
-    this.cached?.client.close()
-    this.cached = null
-  }
-
-  // ── Internal ──
-
-  private async ensure(): Promise<{ client: SikkerKey; expiresAt: number }> {
-    if (this.cached && Date.now() < this.cached.expiresAt - this.renewSkewMs) {
-      return this.cached
-    }
-    // Single in-flight enrollment: concurrent first-calls share one round trip.
-    if (this.pending) return this.pending
-    this.pending = this.enroll()
-      .then(result => {
-        this.cached = result
-        this.pending = null
-        return result
-      })
-      .catch(err => {
-        this.pending = null
-        throw err
-      })
-    return this.pending
-  }
-
-  private async enroll(): Promise<{ client: SikkerKey; expiresAt: number }> {
     // Generate the keypair in memory. The private key never leaves this process.
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
     const jwk = publicKey.export({ format: 'jwk' }) as { x?: string }
@@ -183,16 +101,16 @@ export class BootstrappedClient {
       ...(this.options.name ? { name: this.options.name } : {}),
     })
 
-    const resp = await enrollRegister(this.apiUrl, this.vaultId, body)
+    const resp = await enrollRegister(apiUrl, this.vaultId, body)
 
     const identity: EnrollIdentity = {
       machineId: resp.machineId,
       machineName: resp.machineName,
       vaultId: resp.vaultId,
-      apiUrl: this.apiUrl,
-      privateKeyPath: '', // memory-only: never read after construction
+      apiUrl,
+      privateKeyPath: '', // memory-only: never read
     }
-    return { client: this.factory(identity, privateKey), expiresAt: resp.expiresAt }
+    return this.factory(identity, privateKey)
   }
 }
 
@@ -241,7 +159,7 @@ function enrollRegister(apiUrl: string, vaultId: string, body: string): Promise<
   })
 }
 
-function enrollError(status: number, message: string): Error {
+function enrollError(status: number, message: string): SikkerKeyError {
   switch (status) {
     case 401: return new AuthenticationError(message)
     case 403: return new AccessDeniedError(message)
