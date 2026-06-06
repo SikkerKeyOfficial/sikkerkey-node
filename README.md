@@ -283,7 +283,6 @@ The `vault_` prefix is added automatically if not present.
 |----------|-------------|
 | `SIKKERKEY_IDENTITY` | Path to `identity.json` — overrides vault lookup |
 | `SIKKERKEY_HOME` | Base config directory (default: `~/.sikkerkey`) |
-| `SIKKERKEY_API_URL` | Override the API base URL. Local development only (default: `https://api.sikkerkey.com`) |
 
 ## Retry Behavior
 

@@ -44,6 +44,8 @@ interface EnrollResponse {
   machineName: string
   vaultId: string
   expiresAt: number
+  /** Retrieval-plane base URL (the machine-service); stored as the identity's read URL. */
+  apiUrl?: string
 }
 
 // ── Builder ──
@@ -107,7 +109,10 @@ export class SikkerKeyBootstrap {
       machineId: resp.machineId,
       machineName: resp.machineName,
       vaultId: resp.vaultId,
-      apiUrl,
+      // Enrollment ran against the backend (apiUrl); runtime reads go to the
+      // retrieval plane the backend hands back. Fall back to the enroll URL
+      // only if an older endpoint omits it.
+      apiUrl: resp.apiUrl && resp.apiUrl.length > 0 ? resp.apiUrl : apiUrl,
       privateKeyPath: '', // memory-only: never read
     }
     return this.factory(identity, privateKey)
