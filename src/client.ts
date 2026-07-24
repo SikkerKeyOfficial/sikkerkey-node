@@ -17,6 +17,16 @@ import {
   SikkerKeyError,
 } from './exceptions'
 import { SikkerKeyBootstrap, type BootstrapOptions } from './bootstrap'
+import { SecretCache, deriveKey, type CacheResult } from './cache'
+
+/** Options for {@link SikkerKey.enableCache}. */
+export interface CacheOptions {
+  /** Max age, in seconds, a cached value may be served during an outage. Omit for no expiry. */
+  maxAge?: number
+  /** Called when a value is served from the cache — for your own logging or metrics.
+   *  The SDK itself emits nothing; a fallback is otherwise transparent. */
+  onFallback?: (secretId: string, cachedAt: number) => void
+}
 
 // ── Types ──
 
@@ -59,6 +69,11 @@ export class SikkerKey {
   private watchers: Map<string, (event: WatchEvent) => void> = new Map()
   private pollIntervalMs: number = 15_000
   private pollTimer: ReturnType<typeof setInterval> | null = null
+  // Off until enableCache() is called. When off, a read touches no cache code and
+  // the key below is never derived.
+  private cacheEnabled: boolean = false
+  private cacheOpts: CacheOptions = {}
+  private cacheInstance: SecretCache | null = null
 
   private constructor(identity: Identity, privateKey: crypto.KeyObject) {
     this.identity = identity
@@ -96,12 +111,49 @@ export class SikkerKey {
   get vaultId(): string { return this.identity.vaultId }
   get apiUrl(): string { return this.identity.apiUrl }
 
+  /**
+   * Enable the on-disk fallback cache and return this client (chainable):
+   *
+   *   const sk = SikkerKey.create().enableCache()
+   *
+   * While enabled, every secret read is written to an encrypted, identity-bound
+   * file under ~/.sikkerkey/vaults/<vault>/cache/, and served from there when the
+   * retrieval plane is unreachable (a network failure, or a gateway/origin error
+   * like 502/504 or a Cloudflare 52x) — never when the server returns an
+   * authoritative answer (access denied, deleted, bad auth).
+   * Off by default: until this is called, a read never touches the cache.
+   */
+  enableCache(options: CacheOptions = {}): this {
+    this.cacheEnabled = true
+    this.cacheOpts = options
+    return this
+  }
+
   // ── Read ──
 
   /** Fetch a secret value by ID. */
   async getSecret(secretId: string): Promise<string> {
-    const body = await this.request('GET', `/v1/secret/${secretId}`)
-    return JSON.parse(body).value
+    // Fast path: caching off → behave exactly as before, touching no cache code.
+    if (!this.cacheEnabled) {
+      const body = await this.request('GET', `/v1/secret/${secretId}`)
+      return JSON.parse(body).value
+    }
+    try {
+      const body = await this.request('GET', `/v1/secret/${secretId}`)
+      const value = JSON.parse(body).value
+      try { this.getCache().store(secretId, '', value, null) } catch { /* caching is best-effort */ }
+      return value
+    } catch (e) {
+      if (isUnavailable(e)) {
+        const hit = this.loadFromCache(secretId)
+        if (hit) {
+          // Transparent by default; the app observes fallback only via onFallback.
+          this.cacheOpts.onFallback?.(secretId, hit.cachedAt)
+          return hit.value
+        }
+      }
+      throw e
+    }
   }
 
   /** Fetch a structured secret as a field map. */
@@ -275,6 +327,34 @@ export class SikkerKey {
 
   // ── Internal ──
 
+  /** Lazily build the cache, deriving its key from the Ed25519 seed on first use. */
+  private getCache(): SecretCache {
+    if (this.cacheInstance === null) {
+      const jwk = this.privateKey.export({ format: 'jwk' }) as { d?: string }
+      if (!jwk.d) throw new ConfigurationError('Caching requires an exportable Ed25519 identity key')
+      const seed = Buffer.from(jwk.d, 'base64url')
+      this.cacheInstance = new SecretCache(
+        this.identity.vaultId,
+        this.identity.machineId,
+        deriveKey(seed, this.identity.vaultId),
+      )
+    }
+    return this.cacheInstance
+  }
+
+  /** Load a cached entry, honoring maxAge. Returns null on miss, expiry, or error. */
+  private loadFromCache(secretId: string): CacheResult | null {
+    let hit: CacheResult | null
+    try {
+      hit = this.getCache().load(secretId)
+    } catch {
+      return null
+    }
+    if (!hit) return null
+    if (this.cacheOpts.maxAge != null && Date.now() / 1000 - hit.cachedAt > this.cacheOpts.maxAge) return null
+    return hit
+  }
+
   private async request(method: string, reqPath: string, body?: string, expectStatus: number = 200): Promise<string> {
     let lastError: SikkerKeyError | null = null
 
@@ -435,6 +515,25 @@ function loadIdentity(filePath: string): { identity: Identity; privateKey: crypt
 }
 
 // ── Helpers ──
+
+/**
+ * Statuses that mean no authoritative answer reached us from the origin, so the
+ * fallback cache may serve the request:
+ *   0         transport failure — couldn't reach the edge at all
+ *   502 / 504 gateway couldn't get a usable response from the origin
+ *   503       service temporarily unavailable
+ *   520–527   Cloudflare origin-error family: down / refused / timeout /
+ *             unreachable / edge↔origin TLS failure
+ *   530       edge couldn't resolve or reach the origin
+ * A 401/403/404/429 is an authoritative answer (bad auth, revoked, deleted,
+ * throttled) and is NEVER served from cache — that would defeat revocation or
+ * resurrect a deleted secret. 500/501 (the origin ran and errored) are excluded too.
+ */
+const UNAVAILABLE_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530])
+
+function isUnavailable(e: unknown): boolean {
+  return e instanceof ApiError && (e.httpStatus === 0 || UNAVAILABLE_STATUSES.has(e.httpStatus))
+}
 
 function makeException(code: number, message: string): ApiError {
   switch (code) {

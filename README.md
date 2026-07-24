@@ -5,328 +5,423 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 
-The official Node.js SDK for [SikkerKey](https://sikkerkey.com). Read-only access to secrets using Ed25519 machine authentication. Zero external dependencies - Node.js built-in `crypto`, `fs`, `http`, `https` only. Runs on persistent hosts (identity on disk) and on serverless or ephemeral environments (memory-only bootstrap).
+Use the official SikkerKey Node.js SDK to give a JavaScript or TypeScript application read access to the secrets its machine is authorized to use.
 
-## Installation
+The SDK can:
+
+- Read standard and structured secrets asynchronously.
+- List the secrets available to a machine.
+- Export accessible secrets as application-friendly key/value pairs.
+- Monitor selected secrets for changes.
+- Use persistent machine identities or memory-only ephemeral identities.
+- Keep an optional encrypted fallback cache for temporary service or network outages.
+
+After the client is initialized, every secret request is authenticated with the machine's Ed25519 identity. The package supports Node.js 18 or newer, includes TypeScript declarations, and uses only Node.js built-in modules.
+
+## Install the SDK
 
 ```bash
 npm install @sikkerkey/sdk
 ```
 
-Requires Node.js 18+.
+The version represented by this source is `1.4.1`.
 
-## Quick Start
-
-```typescript
-import { SikkerKey } from '@sikkerkey/sdk'
-
-const sk = SikkerKey.create('vault_abc123')
-const apiKey = await sk.getSecret('sk_stripe_key')
-```
-
-The SDK reads the machine identity from `~/.sikkerkey/vaults/<vault-id>/identity.json`, signs every request with the machine's Ed25519 private key, and returns the decrypted value.
-
-## Client Creation
-
-```typescript
-// Explicit vault ID
-const sk = SikkerKey.create('vault_abc123')
-
-// Direct path to identity file
-const sk = SikkerKey.create('/etc/sikkerkey/vaults/vault_abc123/identity.json')
-
-// Auto-detect: uses SIKKERKEY_IDENTITY env, or finds the single vault on disk
-const sk = SikkerKey.create()
-```
-
-Auto-detection throws `ConfigurationError` if multiple vaults are registered and no vault is specified.
-
-## Serverless (Memory-Only Bootstrap)
-
-On a long-lived host the SDK loads a persistent identity from disk. Serverless and other ephemeral or read-only-filesystem environments (Vercel, Netlify, AWS Lambda, Google Cloud Run, Fly.io, and similar) have no identity to persist. `SikkerKey.bootstrap()` handles that case: it generates an Ed25519 keypair in memory, enrolls a short-lived ephemeral machine with an enrollment token, and reads secrets, all without writing anything to disk.
+## Read your first secret
 
 ```typescript
 import { SikkerKey } from '@sikkerkey/sdk'
 
-const sk = await SikkerKey.bootstrap(
-  process.env.SIKKERKEY_VAULT_ID,
-  process.env.SIKKERKEY_ENROLLMENT_TOKEN,
+const sikkerKey = SikkerKey.create('vault_abc123')
+const apiKey = await sikkerKey.getSecret('sk_stripe_key')
+```
+
+The SDK loads the machine identity from:
+
+```text
+~/.sikkerkey/vaults/vault_abc123/identity.json
+```
+
+It signs the request with the machine's Ed25519 private key and returns the secret value as a `string`. Your application's access remains limited by the machine's configured access.
+
+## Create a client
+
+Client creation from disk is synchronous:
+
+```typescript
+// Select a registered vault.
+const byVault = SikkerKey.create('vault_abc123')
+
+// Load a specific identity file.
+const byPath = SikkerKey.create(
+  '/etc/sikkerkey/vaults/vault_abc123/identity.json',
+)
+
+// Use SIKKERKEY_IDENTITY or auto-select the only registered vault.
+const automatically = SikkerKey.create()
+```
+
+When no argument is supplied, the SDK checks `SIKKERKEY_IDENTITY` first. If that variable is not set, it uses the only registered vault under `~/.sikkerkey/vaults/`.
+
+If more than one vault is registered, select one explicitly. Missing identities, unreadable keys, invalid identity files, and ambiguous vault selection produce a `ConfigurationError`.
+
+The `vault_` prefix is added when a vault ID is supplied without it.
+
+### Use a different identity directory
+
+```bash
+export SIKKERKEY_HOME=/var/lib/sikkerkey
+```
+
+The SDK will look under:
+
+```text
+/var/lib/sikkerkey/vaults/<vault-id>/identity.json
+```
+
+## Use an ephemeral identity
+
+Use the memory-only bootstrap flow for short-lived or read-only environments:
+
+```typescript
+import { SikkerKey } from '@sikkerkey/sdk'
+
+const sikkerKey = await SikkerKey.bootstrap(
+  process.env.SIKKERKEY_VAULT_ID!,
+  process.env.SIKKERKEY_ENROLLMENT_TOKEN!,
 ).inMemory()
 
-const dbUrl = await sk.getSecret('sk_db_prod')
+const databaseUrl =
+  await sikkerKey.getSecret('sk_db_prod')
 ```
 
-Create an enrollment token in the dashboard and supply its plaintext plus your vault ID. The token only registers an ephemeral machine scoped to the policy you set (projects, secrets, lifetime); it cannot read secrets on its own.
+`SikkerKey.bootstrap` creates a bootstrap builder. Calling `inMemory`:
 
-### How It Works
+1. Generates an Ed25519 key pair in memory.
+2. Uses the enrollment token to register an ephemeral machine.
+3. Keeps the private key inside the running Node.js process.
+4. Returns an ordinary `SikkerKey` client.
 
-- `await bootstrap(vaultId, token, options?).inMemory()` enrolls once: it generates a keypair in memory, registers an ephemeral machine, and returns a ready client.
-- The returned client signs every read with the in-memory private key, exactly like a disk-based client.
-- Nothing is written to disk. The private key lives only in process memory and is gone when the instance is recycled.
-- The ephemeral machine lives for the lifetime set on the enrollment token. Reading after it expires fails like any expired machine, so set the token's machine lifetime to suit your workload. The common path is to read at startup and hold the values.
+Nothing is written to disk. Enrollment errors are returned by `inMemory`, and the private key disappears when the process exits.
 
-Enrollment errors (bad token, sealed vault, IP not allowed) surface from the `inMemory()` call, so a misconfigured deployment fails at startup rather than on a later request.
+The enrollment token registers the machine; it does not read secrets itself. The resulting machine remains subject to the token's permitted scope, use limit, hostname rules, and machine lifetime. Reads fail with `AuthenticationError` after the machine expires.
 
-### Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `hostname` | `$HOSTNAME`, then `serverless` | Label recorded on the machine. Must match the token's hostname pattern if one is set |
-| `name` | none | Optional machine name to request. Overridden when the enrollment token defines a name pattern (the server generates the name from it) |
-
-The resolved value is an ordinary `SikkerKey` client with the same methods as a disk-based one (`getSecret`, `getFields`, `getField`, `listSecrets`, `listSecretsByProject`, `export`, `watch`, `close`).
-
-### Provisioning the Token for Serverless
-
-When you create the enrollment token for a serverless deployment:
-
-- Set a short machine lifetime (minutes). Each cold start mints a fresh ephemeral machine, and short-lived ones free their slot quickly as they expire.
-- Set max-uses high enough for your cold-start and concurrency volume.
-- Leave the source-CIDR restriction unset, since serverless egress IPs are dynamic.
-- If the vault has an IP allowlist, make sure it permits the platform's egress or leave it off. Enrollment enforces the allowlist.
-- Set a name pattern on the token (for example `vercel-{uuid8}`) so each cold-start machine gets a clean, unique name in the dashboard instead of all sharing one hostname. A name pattern takes precedence over any `name` the SDK sends. `{uuidN}` inserts N random characters (4 to 32, default 8); `{uuid}` inserts 8.
-
-Each live ephemeral machine counts against your plan's machine limit until it expires and is cleaned up, so size your plan for your expected concurrency.
-
-Requires a Node.js runtime with outbound HTTPS. Edge runtimes, which lack Node's `crypto` and `fs`, are not supported yet.
-
-## Reading Secrets
-
-### Single Value
+### Set the machine hostname and name
 
 ```typescript
-const apiKey = await sk.getSecret('sk_stripe_prod')
+const sikkerKey = await SikkerKey.bootstrap(
+  vaultId,
+  enrollmentToken,
+  {
+    hostname: 'worker-1',
+    name: 'invoice-runner',
+  },
+).inMemory()
 ```
 
-### Structured (Multiple Fields)
+`hostname` defaults to the `HOSTNAME` environment variable and then to `serverless`. A name pattern configured on the enrollment token takes precedence over `name`.
+
+For reliable ephemeral deployments:
+
+- Set a machine lifetime long enough for the workload to finish.
+- Allow enough token uses for expected cold starts and concurrency.
+- Use a unique name pattern such as `worker-{uuid8}`.
+- Ensure the vault's IP allowlist permits the workload's outbound address when an allowlist is enabled.
+
+Each active ephemeral machine uses a machine slot until it expires.
+
+The SDK requires a Node.js runtime with outbound HTTPS. Browser and edge runtimes are not supported because the SDK relies on Node's `crypto`, `fs`, `http`, and `https` modules.
+
+## Read secrets
+
+### Standard secrets
 
 ```typescript
-const fields = await sk.getFields('sk_db_prod')
-const host = fields.host       // "db.example.com"
-const password = fields.password // "hunter2"
+const apiKey =
+  await sikkerKey.getSecret('sk_stripe_prod')
 ```
 
-Throws `SecretStructureError` if the secret value is not a JSON object.
-
-### Single Field
+### Structured secrets
 
 ```typescript
-const password = await sk.getField('sk_db_prod', 'password')
+const database =
+  await sikkerKey.getFields('sk_db_prod')
+
+const host = database.host
+const username = database.username
+const password = database.password
 ```
 
-Throws `FieldNotFoundError` if the field doesn't exist. The error message includes the available field names.
+`getFields` expects a JSON object and converts each property to a string. It throws `SecretStructureError` for another structure.
 
-## Listing Secrets
+Use `getField` when the application needs one field:
 
 ```typescript
-// All secrets this machine can access
-const secrets = await sk.listSecrets()
-for (const s of secrets) {
-  console.log(`${s.id}: ${s.name}`)
+const password = await sikkerKey.getField(
+  'sk_db_prod',
+  'password',
+)
+```
+
+A missing field produces `FieldNotFoundError` with the available field names.
+
+## Discover accessible secrets
+
+```typescript
+const secrets = await sikkerKey.listSecrets()
+
+for (const secret of secrets) {
+  console.log(`${secret.id}: ${secret.name}`)
 }
-
-// Secrets in a specific project
-const projectSecrets = await sk.listSecretsByProject('proj_production')
 ```
 
-Each `SecretListItem` has `id`, `name`, `fieldNames` (null for single-value), and `projectId`.
-
-## Export
-
-Export all accessible secrets as a flat key-value map in a single round trip:
+Limit the result to one project:
 
 ```typescript
-const env = await sk.export()
-// { API_KEY: "sk-live-...", DB_CREDS_HOST: "db.example.com", DB_CREDS_PASSWORD: "s3cret" }
-
-// Scoped to a project
-const env = await sk.export('proj_production')
+const productionSecrets =
+  await sikkerKey.listSecretsByProject('proj_production')
 ```
 
-Secret names are converted to uppercase env format. Structured secrets are flattened: `SECRET_NAME_FIELD_NAME`.
+Each `SecretListItem` contains:
 
-## Watching for Changes
+| Property | Type | Meaning |
+|---|---|---|
+| `id` | `string` | Secret ID used by read methods |
+| `name` | `string` | Display name |
+| `fieldNames` | `string \| null` | Optional structured-field metadata |
+| `projectId` | `string \| null` | Owning project, when present |
 
-Watch secrets for real-time updates. When a secret is rotated, updated, or deleted, the callback fires with the new value. Polling uses `setInterval` on Node's event loop - your application is never blocked.
+Listing returns metadata, not secret values.
+
+## Export secrets for application configuration
 
 ```typescript
-sk.watch('sk_db_password', (event) => {
+const configuration = await sikkerKey.export()
+```
+
+Limit the export to a project:
+
+```typescript
+const productionConfiguration =
+  await sikkerKey.export('proj_production')
+```
+
+The returned `Record<string, string>` uses uppercase environment-style names. Structured secrets are expanded into one entry per field:
+
+```text
+API_KEY
+DB_CREDENTIALS_HOST
+DB_CREDENTIALS_USERNAME
+DB_CREDENTIALS_PASSWORD
+```
+
+## Continue reads during temporary outages
+
+The fallback cache is disabled by default:
+
+```typescript
+const sikkerKey = SikkerKey
+  .create('vault_abc123')
+  .enableCache()
+```
+
+After it is enabled, successful `getSecret` reads are stored under:
+
+```text
+~/.sikkerkey/vaults/<vault-id>/cache/
+```
+
+`getFields` and `getField` use `getSecret`, so their successful reads are cached too. Cache writes are best-effort and cannot turn a successful live read into a failure.
+
+The SDK can return a cached value after a network failure, request timeout, or HTTP `502`, `503`, `504`, `520` through `527`, or `530`.
+
+Authentication failures, revoked access, missing secrets, rate limits, and other authoritative responses are never replaced by cached values.
+
+Entries use AES-256-GCM with a key derived from the machine's Ed25519 identity and vault ID. Tampered entries and entries belonging to another identity are rejected. The `.skc` format is compatible with other SikkerKey SDKs and the SikkerKey CLI.
+
+### Limit cache age and observe fallback use
+
+```typescript
+const sikkerKey = SikkerKey
+  .create('vault_abc123')
+  .enableCache({
+    maxAge: 3600,
+    onFallback: (secretId, cachedAt) => {
+      console.log(
+        `Using cached value for ${secretId} from epoch ${cachedAt}`,
+      )
+    },
+  })
+```
+
+`maxAge` is measured in seconds. Omitting it means no automatic expiry. The callback is optional; fallback is otherwise silent.
+
+The cache is intended for a host with a persistent, protected identity directory, not a memory-only identity that disappears with the process.
+
+## Monitor secrets for changes
+
+```typescript
+sikkerKey.watch('sk_db_credentials', (event) => {
   switch (event.status) {
     case 'changed':
-      console.log(`New value: ${event.value}`)
-      // Structured secrets include parsed fields
-      console.log(`Fields:`, event.fields)
+      console.log(`${event.secretId} changed`)
+      console.log(event.fields)
       break
+
     case 'deleted':
-      console.log('Secret was deleted')
+      console.log(`${event.secretId} was deleted`)
       break
+
     case 'access_denied':
-      console.log('Access revoked')
+      console.log(`Access to ${event.secretId} was removed`)
       break
+
     case 'error':
-      console.log(`Error: ${event.error}`)
+      console.log(`Could not retrieve the update: ${event.error}`)
       break
   }
 })
 ```
 
-### Practical Example
+The SDK polls through an unreferenced Node.js interval every 15 seconds by default. The timer does not keep an otherwise idle process alive.
+
+For changed secrets, `value` contains the complete new value and `fields` contains parsed structured fields when available. Deleted and inaccessible secrets are automatically removed from the watch list. A failed poll is skipped and tried again during a later interval; it does not emit an event by itself.
+
+Callbacks run from the asynchronous polling flow. Keep them short or hand slow work to your application's queue.
+
+### Change or stop polling
 
 ```typescript
-// Auto-rotate database credentials
-sk.watch('sk_db_credentials', (event) => {
-  if (event.status === 'changed') {
-    db.reconfigure({
-      username: event.fields!.username,
-      password: event.fields!.password,
-    })
-  }
-})
+sikkerKey.setPollInterval(30) // seconds; minimum 10
+sikkerKey.unwatch('sk_db_credentials')
+sikkerKey.close()
 ```
 
-### Poll Interval
+Changing the interval restarts the timer. `close` stops polling and clears all callbacks, while leaving the client available for later reads.
 
-The default poll interval is 15 seconds. The server enforces a minimum of 10 seconds.
+## Work with more than one vault
 
 ```typescript
-sk.setPollInterval(30) // seconds
+const production =
+  SikkerKey.create('vault_production')
+const staging =
+  SikkerKey.create('vault_staging')
+
+const productionKey =
+  await production.getSecret('sk_api_key')
+const stagingKey =
+  await staging.getSecret('sk_api_key')
 ```
 
-### Stop Watching
+List locally registered vault IDs:
 
 ```typescript
-// Stop watching a specific secret
-sk.unwatch('sk_db_password')
-
-// Stop all watches and shut down polling
-sk.close()
+const vaultIds = SikkerKey.listVaults()
 ```
 
-## Multi-Vault
+## Inspect the active machine
 
 ```typescript
-const prod = SikkerKey.create('vault_a1b2c3')
-const staging = SikkerKey.create('vault_x9y8z7')
-
-const prodKey = await prod.getSecret('sk_api_key')
-const stagingKey = await staging.getSecret('sk_api_key')
+console.log(sikkerKey.machineId)
+console.log(sikkerKey.machineName)
+console.log(sikkerKey.vaultId)
+console.log(sikkerKey.apiUrl)
 ```
 
-### List Registered Vaults
+| Property | Meaning |
+|---|---|
+| `machineId` | Machine UUID assigned by SikkerKey |
+| `machineName` | Machine name assigned during provisioning or enrollment |
+| `vaultId` | Vault associated with the identity |
+| `apiUrl` | Service endpoint stored in the identity |
+
+## Handle errors
 
 ```typescript
-const vaults = SikkerKey.listVaults()
-// ["vault_a1b2c3", "vault_x9y8z7"]
-```
-
-## Machine Info
-
-```typescript
-sk.machineId    // "550e8400-e29b-41d4-a716-446655440000"
-sk.machineName  // "api-server-1"
-sk.vaultId      // "vault_abc123"
-sk.apiUrl       // "https://api.sikkerkey.com"
-```
-
-## Error Handling
-
-The SDK uses typed exceptions for every error case:
-
-```typescript
-import { SikkerKey, NotFoundError, AccessDeniedError, AuthenticationError } from '@sikkerkey/sdk'
+import {
+  AccessDeniedError,
+  ApiError,
+  AuthenticationError,
+  ConfigurationError,
+  NotFoundError,
+  RateLimitedError,
+} from '@sikkerkey/sdk'
 
 try {
-  const secret = await sk.getSecret('sk_nonexistent')
-} catch (e) {
-  if (e instanceof NotFoundError) {
-    // Secret doesn't exist
-  } else if (e instanceof AccessDeniedError) {
-    // Machine not approved or no grant
-  } else if (e instanceof AuthenticationError) {
-    // Invalid signature or unknown machine
+  const value =
+    await sikkerKey.getSecret('sk_example')
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    console.error('Secret not found')
+  } else if (error instanceof AccessDeniedError) {
+    console.error('Access denied')
+  } else if (error instanceof AuthenticationError) {
+    console.error('Authentication failed')
+  } else if (error instanceof RateLimitedError) {
+    console.error('Request remained rate-limited')
+  } else if (error instanceof ApiError) {
+    console.error(
+      `SikkerKey returned HTTP ${error.httpStatus}`,
+    )
+  } else if (error instanceof ConfigurationError) {
+    console.error('Machine identity could not be loaded')
   }
 }
 ```
 
-### Exception Hierarchy
+### Exception reference
 
-```
-SikkerKeyError
-├── ConfigurationError      — identity file missing, bad key, invalid config
-├── SecretStructureError    — secret is not a JSON object (getFields/getField)
-├── FieldNotFoundError      — field not in structured secret
-└── ApiError                — HTTP error from the API
-    ├── AuthenticationError — 401
-    ├── AccessDeniedError   — 403
-    ├── NotFoundError       — 404
-    ├── ConflictError       — 409
-    ├── RateLimitedError    — 429
-    └── ServerSealedError   — 503
-```
+| Exception | When it is used |
+|---|---|
+| `ConfigurationError` | Identity, key, vault-selection, or bootstrap configuration is invalid |
+| `AuthenticationError` | HTTP `401` |
+| `AccessDeniedError` | HTTP `403` |
+| `NotFoundError` | HTTP `404` |
+| `ConflictError` | HTTP `409` |
+| `RateLimitedError` | HTTP `429` |
+| `ServerSealedError` | HTTP `503` |
+| `ApiError` | Another HTTP or network error; inspect `httpStatus` |
+| `SecretStructureError` | `getFields` or `getField` received a non-object value |
+| `FieldNotFoundError` | The requested structured field does not exist |
 
-`ApiError` has a `httpStatus` property with the HTTP status code.
+Network failures and request timeouts use an `ApiError` with `httpStatus === 0`.
 
-## Identity Resolution
+### Retries and timeout
 
-The SDK resolves the identity file in this order:
+Authenticated secret requests retry network failures, request timeouts, and HTTP `429` or `503` responses up to three times. Retries wait 1, 2, and 4 seconds, and every attempt receives a fresh timestamp and nonce.
 
-1. **Explicit path** — starts with `/` or contains `identity.json`
-2. **Vault ID** — looks up `~/.sikkerkey/vaults/{vaultId}/identity.json`
-3. **`SIKKERKEY_IDENTITY` env** — path to identity file
-4. **Auto-detect** — single vault on disk
+Each request has a 15-second timeout. Other HTTP responses are returned immediately as their matching exception.
 
-The `vault_` prefix is added automatically if not present.
+## Feature-to-API reference
 
-## Environment Variables
+| What you want to do | SDK API | Result |
+|---|---|---|
+| Create a client from disk | `SikkerKey.create(vaultOrPath?)` | `SikkerKey` |
+| Prepare ephemeral enrollment | `SikkerKey.bootstrap(vaultId, token, options?)` | `SikkerKeyBootstrap` |
+| Complete ephemeral enrollment | `inMemory()` | `Promise<SikkerKey>` |
+| List locally registered vaults | `SikkerKey.listVaults()` | `string[]` |
+| Enable outage fallback | `enableCache(options?)` | The same `SikkerKey` client |
+| Read a standard secret | `getSecret(secretId)` | `Promise<string>` |
+| Read every structured field | `getFields(secretId)` | `Promise<Record<string, string>>` |
+| Read one structured field | `getField(secretId, field)` | `Promise<string>` |
+| List accessible secrets | `listSecrets()` | `Promise<SecretListItem[]>` |
+| List accessible secrets in a project | `listSecretsByProject(projectId)` | `Promise<SecretListItem[]>` |
+| Export accessible values | `export(projectId?)` | `Promise<Record<string, string>>` |
+| Monitor a secret | `watch(secretId, callback)` | `void` |
+| Stop monitoring one secret | `unwatch(secretId)` | `void` |
+| Set the polling interval | `setPollInterval(seconds)` | `void` |
+| Stop all monitoring | `close()` | `void` |
 
-| Variable | Description |
-|----------|-------------|
-| `SIKKERKEY_IDENTITY` | Path to `identity.json` — overrides vault lookup |
-| `SIKKERKEY_HOME` | Base config directory (default: `~/.sikkerkey`) |
+## Runtime footprint
 
-## Retry Behavior
-
-429 (rate limited) and 503 (server sealed) responses are retried up to 3 times with exponential backoff (1s, 2s, 4s). Each retry uses a fresh timestamp and nonce. Network errors are also retried.
-
-## Authentication
-
-Every request includes Ed25519-signed headers:
-
-- `X-Machine-Id` — machine UUID
-- `X-Timestamp` — Unix timestamp
-- `X-Nonce` — random base64 nonce (replay protection)
-- `X-Signature` — signature of `method:path:timestamp:nonce:bodyHash`
-
-HTTPS is enforced for all non-localhost connections. 15-second request timeout.
-
-## Method Reference
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `SikkerKey.create(vaultOrPath?)` | `SikkerKey` | Create client from disk identity (sync) |
-| `SikkerKey.bootstrap(vaultId, token, options?)` | `SikkerKeyBootstrap` | Memory-only serverless bootstrap (static); `await .inMemory()` returns a ready client |
-| `SikkerKey.listVaults()` | `string[]` | List registered vault IDs (static) |
-| `getSecret(secretId)` | `Promise<string>` | Read a secret value |
-| `getFields(secretId)` | `Promise<Record<string, string>>` | Read structured secret |
-| `getField(secretId, field)` | `Promise<string>` | Read single field |
-| `listSecrets()` | `Promise<SecretListItem[]>` | List all accessible secrets |
-| `listSecretsByProject(projectId)` | `Promise<SecretListItem[]>` | List secrets in a project |
-| `export(projectId?)` | `Promise<Record<string, string>>` | Export as env map |
-| `watch(secretId, callback)` | `void` | Watch a secret for changes |
-| `unwatch(secretId)` | `void` | Stop watching a secret |
-| `setPollInterval(seconds)` | `void` | Set poll interval (min 10s) |
-| `close()` | `void` | Stop all watches, shut down polling |
-
-## Dependencies
-
-None. Uses Node.js built-ins only: `crypto`, `fs`, `path`, `http`, `https`.
+The SDK uses Node.js built-ins for HTTPS, JSON, Ed25519, AES-GCM, and HKDF. It has no runtime package dependencies.
 
 ## Documentation
 
-- [SDK Overview](https://docs.sikkerkey.com/docs/sdk/overview)
-- [Node.js SDK Reference](https://docs.sikkerkey.com/docs/sdk/node)
-- [Machine Authentication](https://docs.sikkerkey.com/docs/machines/signatures)
+- [SikkerKey documentation](https://docs.sikkerkey.com)
+- [SDK overview](https://docs.sikkerkey.com/docs/sdk/overview)
+- [Node.js SDK reference](https://docs.sikkerkey.com/docs/sdk/node)
+- [Machine authentication](https://docs.sikkerkey.com/docs/machines/signatures)
 
 ## License
 
-MIT - see [LICENSE](LICENSE) for details.
+The SikkerKey Node.js SDK is available under the [MIT License](LICENSE).

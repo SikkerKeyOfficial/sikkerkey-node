@@ -65,7 +65,7 @@ export class RateLimitedError extends ApiError {
   }
 }
 
-/** 503 — server is sealed, awaiting unseal. */
+/** 503 — the service is temporarily unavailable. */
 export class ServerSealedError extends ApiError {
   constructor(message: string) {
     super(message, 503)

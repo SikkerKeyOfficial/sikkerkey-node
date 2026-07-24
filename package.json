@@ -1,6 +1,6 @@
 {
   "name": "@sikkerkey/sdk",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "SikkerKey Node.js SDK — read secrets with machine authentication",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,6 +12,9 @@
     "prepublishOnly": "tsc"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18"
   },
